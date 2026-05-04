@@ -1,151 +1,202 @@
 # %%
 # 03_ee_optimization.py
-# goal: find the kWh sweet-spot that maximizes endurance + efficiency score
+# goal: find the kWh level that puts teams in the competitive endurance range
 #
 # strat:
-# 1. fit a curve for kWh → endurance (curve A)
-# 2. fit a curve for kWh → efficiency  (curve B)
-# 3. add them: kWh → endurance + efficiency  (curve C)
-# 4. mark the peak of curve C - that's the optimal kWh budget
+# 1. fit endurance ~ log(kWh)          – diminishing returns, always increasing
+# 2. fit efficiency ~ (E_max - kWh)    – linear decay constrained to 0 at E_max
+#    (per FSAE rules, efficiency score reaches 0 at the maximum energy threshold)
+# 3. add them → combined curve; green zone marks "competitive" energy (≥ 6 kWh)
 #
-# only teams that scored both events are used (teams that DNF'd efficiency
-# are excluded because they're structural outliers, not an energy-tradeoff
-# story)
+# only teams that completed both events are used (DNF'd efficiency teams are
+# structural outliers, not part of the energy-tradeoff story)
 
 from pathlib import Path
 
 import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
 import numpy as np
 import pandas as pd
 
-# paths
+# ── paths ─────────────────────────────────────────────────────────────────────
 PROCESSED = Path("../data/processed")
 FIGURES   = Path("../figures")
 FIGURES.mkdir(exist_ok=True)
 
-# data
+# ── data ──────────────────────────────────────────────────────────────────────
 df = pd.read_csv(PROCESSED / "fsae_endurance_eff.csv")
-
-# keep only teams with all three values we need
-mask = df["energy_used_kwh"].notna() & df["endurance"].notna() & df["efficiency"].notna()
+mask = (
+    df["energy_used_kwh"].notna()
+    & df["endurance"].notna()
+    & df["efficiency"].notna()
+)
 df_scored = df[mask].copy().reset_index(drop=True)
-
-# derived column
 df_scored["ee_combined"] = df_scored["endurance"] + df_scored["efficiency"]
 
 print(f"Teams with complete energy + score data: {len(df_scored)}")
-print(df_scored[["year", "team", "energy_used_kwh", "endurance", "efficiency", "ee_combined"]]
-      .sort_values("energy_used_kwh").to_string(index=False))
+print(
+    df_scored[["year", "team", "energy_used_kwh", "endurance", "efficiency", "ee_combined"]]
+    .sort_values("energy_used_kwh")
+    .to_string(index=False)
+)
+
+# ── helper: monotone non-decreasing (PAVA / isotonic regression) ──────────────
+def isotonic_increasing(y):
+    """Return a non-decreasing array that is the best L2 fit to y (PAVA)."""
+    y = np.array(y, dtype=float)
+    blocks = [[yi, 1] for yi in y]
+    i = 0
+    while i < len(blocks) - 1:
+        if blocks[i][0] / blocks[i][1] > blocks[i + 1][0] / blocks[i + 1][1]:
+            blocks[i][0] += blocks[i + 1][0]
+            blocks[i][1] += blocks[i + 1][1]
+            blocks.pop(i + 1)
+            if i > 0:
+                i -= 1
+        else:
+            i += 1
+    result = np.empty(len(y))
+    idx = 0
+    for val, cnt in blocks:
+        result[idx : idx + cnt] = val / cnt
+        idx += cnt
+    return result
 
 
-# helper: lowess smoother
-def lowess(x, y, frac=0.55, n_pts=200):
-    """Return (x_smooth, y_smooth) using statsmodels-free iterative LOWESS."""
-    x = np.asarray(x, float)
-    y = np.asarray(y, float)
-    x_grid = np.linspace(x.min(), x.max(), n_pts)
-    y_grid = np.empty(n_pts)
-    h = frac * (x.max() - x.min())          # bandwidth
-
-    for i, xi in enumerate(x_grid):
-        dist = np.abs(x - xi)
-        w = np.maximum(0, 1 - (dist / h) ** 3) ** 3  # tricube weights
-        if w.sum() == 0:
-            y_grid[i] = np.nan
-            continue
-        # weighted least squares: fit a line locally
-        W = np.diag(w)
-        X = np.column_stack([np.ones_like(x), x])
-        try:
-            beta = np.linalg.lstsq(X.T @ W @ X, X.T @ W @ y, rcond=None)[0]
-            y_grid[i] = beta[0] + beta[1] * xi
-        except np.linalg.LinAlgError:
-            y_grid[i] = np.nan
-
-    return x_grid, y_grid
-
-
-# colors & style - thank you claude
+# ── colors ────────────────────────────────────────────────────────────────────
 colors = {2024: "#4C72B0", 2025: "#DD8452"}
-C_END  = "#2ECC71"   # endurance curve
-C_EFF  = "#E74C3C"   # efficiency curve
-C_COMB = "#8E44AD"   # combined curve
+C_END  = "#17BECF"   # teal  – endurance curve
+C_EFF  = "#FF7F0E"   # amber – efficiency curve
+C_COMB = "#8E44AD"   # purple – combined curve
+C_COMP = "#2ECC71"   # green  – competitive zone
 
-# ─────────────────────────────────────────────────────────────────────────────
-# ── data vectors & smooth curves ─────────────────────────────────────────────
-# ─────────────────────────────────────────────────────────────────────────────
-# %% prepare curves
+# ── constants ─────────────────────────────────────────────────────────────────
+E_MAX     = 6.8   # kWh at which efficiency score → 0 (per FSAE rules)
+COMP_KWH  = 6.0   # competitive energy lower bound
+X_LIM     = 7.0   # x-axis ceiling for all plots
 
+# ── %% raw vectors ────────────────────────────────────────────────────────────
 kwh   = df_scored["energy_used_kwh"].values
 end   = df_scored["endurance"].values
 eff   = df_scored["efficiency"].values
-comb  = df_scored["ee_combined"].values
 years = df_scored["year"].values
 
-# smooth curves
-x_s, end_s  = lowess(kwh, end,  frac=0.55)
-x_s, eff_s  = lowess(kwh, eff,  frac=0.55)
-x_s, comb_s = lowess(kwh, comb, frac=0.55)
+# ── %% parametric fits ────────────────────────────────────────────────────────
 
-# find optimal kWh (peak of combined smooth curve)
+# Endurance: log curve  end ≈ a + b·ln(kwh)
+# Rationale: each extra kWh raises the car's pace, but gains diminish as the
+# car is already going fast; always increasing (monotone by construction).
+log_kwh       = np.log(kwh)
+b_end, a_end  = np.polyfit(log_kwh, end, 1)   # [slope, intercept]
+
+# Efficiency: linear decay anchored to 0 at E_MAX  eff ≈ m·(E_MAX - kwh)
+# Rationale: FSAE rules define efficiency score as proportional to energy saved
+# vs. the fastest car; it must reach 0 at the maximum allowed energy budget.
+# OLS with no intercept on the feature (E_MAX - kwh):
+feat_eff = E_MAX - kwh
+m_eff    = np.dot(feat_eff, eff) / np.dot(feat_eff, feat_eff)
+
+# Dense grid for plotting
+x_plot = np.linspace(kwh.min(), X_LIM, 400)
+
+end_s  = isotonic_increasing(a_end + b_end * np.log(x_plot))   # log, monotone
+eff_s  = np.maximum(m_eff * (E_MAX - x_plot), 0.0)             # linear → 0
+comb_s = end_s + eff_s
+
+# Peak of combined (analytical note: occurs where b/x = m_eff → x = b/m_eff,
+# but isotonic + clip may shift it slightly; find numerically)
 opt_idx = np.nanargmax(comb_s)
-opt_kwh = x_s[opt_idx]
+opt_kwh = x_plot[opt_idx]
 opt_val = comb_s[opt_idx]
+
+print(f"\nFit parameters:")
+print(f"  Endurance  log fit : end = {a_end:.1f} + {b_end:.1f}·ln(kWh)")
+print(f"  Efficiency lin fit : eff = {m_eff:.1f}·({E_MAX} - kWh)")
+print(f"  Peak combined at   : {opt_kwh:.2f} kWh  ({opt_val:.0f} pts)")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# FIGURE 2  –  single hero chart: all three curves overlaid + shaded zones
+# FIGURE 1 – individual fits (scatter + curve, side by side)
+# ─────────────────────────────────────────────────────────────────────────────
+# %% individual fit panels
+fig, axes = plt.subplots(1, 2, figsize=(13, 5.5), sharey=False)
+fig.suptitle("Individual Score Fits vs Energy Used", fontsize=13, fontweight="bold")
+
+# ── Left panel: Endurance ─────────────────────────────────────────────────────
+ax1 = axes[0]
+for yr in [2024, 2025]:
+    m = years == yr
+    ax1.scatter(
+        kwh[m], end[m], color=colors[yr], s=70, zorder=3,
+        label=f"{yr}", alpha=0.8, edgecolors="white", linewidths=0.5,
+    )
+ax1.plot(x_plot, end_s, color=C_END, lw=2.5, label=f"Log fit  (R² = {np.corrcoef(end, a_end + b_end*log_kwh)[0,1]**2:.2f})")
+ax1.set_xlabel("Energy Used (kWh)", fontsize=11)
+ax1.set_ylabel("Endurance Score", fontsize=11)
+ax1.set_title("Endurance Score", fontsize=10, fontweight="bold")
+ax1.set_xlim(right=X_LIM)
+ax1.legend(fontsize=9)
+ax1.grid(True, alpha=0.22)
+
+# ── Right panel: Efficiency ───────────────────────────────────────────────────
+ax2 = axes[1]
+for yr in [2024, 2025]:
+    m = years == yr
+    ax2.scatter(
+        kwh[m], eff[m], color=colors[yr], s=70, zorder=3,
+        label=f"{yr}", alpha=0.8, edgecolors="white", linewidths=0.5,
+    )
+eff_pred = np.maximum(m_eff * (E_MAX - kwh), 0.0)
+ax2.plot(x_plot, eff_s, color=C_EFF, lw=2.5, label=f"Linear fit  (R² = {np.corrcoef(eff, eff_pred)[0,1]**2:.2f})")
+ax2.axvline(E_MAX, color=C_EFF, lw=1.4, ls=":", alpha=0.75, label=f"Rules cap → 0 at {E_MAX} kWh")
+ax2.set_xlabel("Energy Used (kWh)", fontsize=11)
+ax2.set_ylabel("Efficiency Score", fontsize=11)
+ax2.set_title(f"Efficiency Score", fontsize=10, fontweight="bold")
+ax2.set_xlim(right=X_LIM)
+ax2.set_ylim(bottom=0)
+ax2.legend(fontsize=9)
+ax2.grid(True, alpha=0.22)
+
+plt.tight_layout()
+plt.savefig(FIGURES / "03_ee_individual_fits.png", dpi=150, bbox_inches="tight")
+plt.show()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FIGURE 2 – hero chart: all three curves + competitive zone (no raw scatter)
 # ─────────────────────────────────────────────────────────────────────────────
 # %% hero chart
 fig, ax = plt.subplots(figsize=(10, 6))
 
-# scatter (raw data) coloured by year, slightly transparent
-for yr in [2024, 2025]:
-    m = years == yr
-    ax.scatter(kwh[m], comb[m], color=colors[yr], s=65, zorder=3,
-               label=f"{yr} data", alpha=0.75, edgecolors="white", linewidths=0.5)
-
-# individual curves (lighter)
-ax.plot(x_s, end_s,  color=C_END,  lw=1.8, ls="-.",  alpha=0.7, label="Endurance fit")
-ax.plot(x_s, eff_s,  color=C_EFF,  lw=1.8, ls="--",  alpha=0.7, label="Efficiency fit")
+# individual curves
+ax.plot(x_plot, end_s,  color=C_END,  lw=2.0, ls="-.",  alpha=0.85, label="Endurance fit")
+ax.plot(x_plot, eff_s,  color=C_EFF,  lw=2.0, ls="--",  alpha=0.85, label="Efficiency fit")
 
 # combined curve (bold)
-ax.plot(x_s, comb_s, color=C_COMB, lw=3,             label="Combined fit (Endurance + Efficiency)")
+ax.plot(x_plot, comb_s, color=C_COMB, lw=3.0, label="Combined  (Endurance + Efficiency)")
 
-# zone shading
-x_min, x_max = x_s[0], x_s[-1]
-ax.axvspan(x_min,    opt_kwh - 0.5, alpha=0.06, color=C_EFF, label="Under-energy zone")
-ax.axvspan(opt_kwh + 0.5, x_max,    alpha=0.06, color=C_END, label="Over-energy zone")
-ax.axvspan(opt_kwh - 0.5, opt_kwh + 0.5, alpha=0.12, color=C_COMB, label="Sweet spot ±0.5 kWh")
+# competitive zone: green shading from COMP_KWH → X_LIM
+ax.axvspan(COMP_KWH, X_LIM, alpha=0.10, color=C_COMP, label=f"Competitive energy usage  (≥ {COMP_KWH} kWh)")
+ax.axvline(COMP_KWH, color=C_COMP, lw=2.2, ls="--", alpha=0.95)
 
-# optimum marker
-ax.scatter([opt_kwh], [opt_val], color=C_COMB, s=220, zorder=6,
-           marker="*", edgecolors="white", linewidths=1)
-ax.axvline(opt_kwh, color=C_COMB, lw=1.6, ls="--", alpha=0.8)
+# annotation — placed inside the green zone, low enough to clear all curves
+y_ann = float(np.interp(COMP_KWH, x_plot, comb_s))
 ax.annotate(
-    f"Optimal  ≈ {opt_kwh:.2f} kWh\nPeak combined ≈ {opt_val:.0f} pts",
-    xy=(opt_kwh, opt_val),
-    xytext=(opt_kwh + 0.4, opt_val - 30),
-    fontsize=10, color=C_COMB, fontweight="bold",
-    bbox=dict(boxstyle="round,pad=0.3", fc="white", ec=C_COMB, alpha=0.85),
-    arrowprops=dict(arrowstyle="->", color=C_COMB, lw=1.2),
+    f"≥ {COMP_KWH} kWh\nto be competitive\nin endurance",
+    xy=(COMP_KWH, y_ann),
+    xytext=(COMP_KWH + 0.2, 80),
+    fontsize=10, color=C_COMP, fontweight="bold",
+    bbox=dict(boxstyle="round,pad=0.35", fc="white", ec=C_COMP, alpha=0.9),
+    arrowprops=dict(arrowstyle="->", color=C_COMP, lw=1.3),
 )
-
-# zone labels
-y_bot = ax.get_ylim()[0]
-ax.text(x_min + 0.05, y_bot + 5, "← Too low kWh\n  (great efficiency,\n   weak endurance)",
-        fontsize=8, color=C_EFF, alpha=0.8, va="bottom")
-ax.text(x_max - 0.05, y_bot + 5, "Too high kWh →\n  (great endurance,\n   weak efficiency)",
-        fontsize=8, color=C_END, alpha=0.8, va="bottom", ha="right")
 
 ax.set_xlabel("Energy Used (kWh)", fontsize=12)
 ax.set_ylabel("Score", fontsize=12)
 ax.set_title(
     "Energy Optimization: kWh vs. Endurance & Efficiency Scores\n",
-    fontsize=12, fontweight="bold"
+    fontsize=12, fontweight="bold",
 )
-ax.legend(fontsize=8.5, loc="upper left", ncol=2)
+ax.set_xlim(right=X_LIM)
+ax.legend(fontsize=9, loc="upper left", ncol=2)
 ax.grid(True, alpha=0.22)
 plt.tight_layout()
 plt.savefig(FIGURES / "03_ee_optimization_hero.png", dpi=150)
@@ -153,30 +204,27 @@ plt.show()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# FIGURE 3  –  sensitivity table: what combined score do you get at each kWh?
+# FIGURE 3 – sensitivity table
 # ─────────────────────────────────────────────────────────────────────────────
 # %% sensitivity printout
 print("\n=== Sensitivity: kWh vs predicted combined E+E score ===")
 sample_kwh = np.arange(
     np.floor(kwh.min() * 10) / 10,
-    np.ceil(kwh.max() * 10)  / 10 + 0.1,
-    0.25
+    X_LIM + 0.1,
+    0.25,
 )
-
-# interpolate smooth curves at those points
-from numpy import interp
-end_interp  = interp(sample_kwh, x_s, end_s)
-eff_interp  = interp(sample_kwh, x_s, eff_s)
-comb_interp = interp(sample_kwh, x_s, comb_s)
+end_interp  = np.interp(sample_kwh, x_plot, end_s)
+eff_interp  = np.interp(sample_kwh, x_plot, eff_s)
+comb_interp = np.interp(sample_kwh, x_plot, comb_s)
 
 sens_df = pd.DataFrame({
-    "kWh":              np.round(sample_kwh, 2),
-    "pred_endurance":   np.round(end_interp, 1),
-    "pred_efficiency":  np.round(eff_interp, 1),
-    "pred_combined":    np.round(comb_interp, 1),
+    "kWh":             np.round(sample_kwh, 2),
+    "pred_endurance":  np.round(end_interp, 1),
+    "pred_efficiency": np.round(eff_interp, 1),
+    "pred_combined":   np.round(comb_interp, 1),
 })
 sens_df["delta_from_peak"] = np.round(comb_interp - opt_val, 1)
 print(sens_df.to_string(index=False))
-print(f"\n★ Optimal kWh: {opt_kwh:.3f}")
-print(f"★ Peak combined score (smooth): {opt_val:.1f}")
-print(f"★ Data range: {kwh.min():.3f} – {kwh.max():.3f} kWh")
+print(f"\n★ Peak combined at  : {opt_kwh:.3f} kWh  ({opt_val:.1f} pts)")
+print(f"★ Competitive bound : {COMP_KWH} kWh")
+print(f"★ Data range        : {kwh.min():.3f} – {kwh.max():.3f} kWh")
