@@ -1,8 +1,9 @@
 # %% imports
-import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
 from pathlib import Path
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
 
 PROCESSED = Path("../data/processed")
 FIGURES = Path("../figures")
@@ -12,7 +13,16 @@ df = pd.read_csv(PROCESSED / "fsae_endurance.csv")
 
 # %% correlation matrix
 # only teams that completed endurance, both years combined
-EVENT_COLS = ["cost", "presentation", "design", "accel", "skidpad", "autocross", "endurance", "efficiency"]
+EVENT_COLS = [
+    "cost",
+    "presentation",
+    "design",
+    "accel",
+    "skidpad",
+    "autocross",
+    "endurance",
+    "efficiency",
+]
 
 corr = df[EVENT_COLS].corr()
 
@@ -29,7 +39,9 @@ ax.set_yticklabels(EVENT_COLS)
 for i in range(len(EVENT_COLS)):
     for j in range(len(EVENT_COLS)):
         if not np.isnan(corr.iloc[i, j]):
-            ax.text(j, i, f"{corr.iloc[i, j]:.2f}", ha="center", va="center", fontsize=8)
+            ax.text(
+                j, i, f"{corr.iloc[i, j]:.2f}", ha="center", va="center", fontsize=8
+            )
 
 ax.set_title("Event Score Correlations (teams that completed endurance, 2024+2025)")
 plt.tight_layout()
@@ -50,9 +62,14 @@ fig, ax = plt.subplots(figsize=(7, 5))
 for yr, grp in df.groupby("year"):
     ax.scatter(grp["ee_combined"], grp["total_ex_ee"], label=str(yr), s=50)
     for _, row in grp.iterrows():
-        ax.annotate(row["team"].split(" - ")[0].split("Univ")[0].strip(),
-                    (row["ee_combined"], row["total_ex_ee"]),
-                    fontsize=6, alpha=0.7, xytext=(4, 2), textcoords="offset points")
+        ax.annotate(
+            row["team"].split(" - ")[0].split("Univ")[0].strip(),
+            (row["ee_combined"], row["total_ex_ee"]),
+            fontsize=6,
+            alpha=0.7,
+            xytext=(4, 2),
+            textcoords="offset points",
+        )
 
 ax.set_xlabel("E+E Combined Score (endurance + efficiency)")
 ax.set_ylabel("Total Score excluding E+E")
@@ -72,7 +89,7 @@ for yr, grp in df.groupby("year"):
 mask = df["endurance"].notna() & df["total"].notna()
 m, b = np.polyfit(df.loc[mask, "endurance"], df.loc[mask, "total"], 1)
 x = np.linspace(df["endurance"].min(), df["endurance"].max(), 100)
-ax.plot(x, m*x + b, "k--", alpha=0.4, label=f"fit (slope={m:.2f})")
+ax.plot(x, m * x + b, "k--", alpha=0.4, label=f"fit (slope={m:.2f})")
 
 ax.set_xlabel("Endurance Score")
 ax.set_ylabel("Total Score")
@@ -82,5 +99,7 @@ plt.tight_layout()
 plt.savefig(FIGURES / "01_endurance_vs_total.png", dpi=150)
 plt.show()
 
-print(f"\nfor every 1 point gain in endurance score, total score goes up ~{m:.2f} points")
+print(
+    f"\nfor every 1 point gain in endurance score, total score goes up ~{m:.2f} points"
+)
 print(f"r = {df['endurance'].corr(df['total']):.3f}")
