@@ -22,9 +22,20 @@ EVENT_COLS = [
     "autocross",
     "endurance",
     "efficiency",
+    "combined",
+    "total",
+    "total_ex_ee",
 ]
 
+df["total"] = df[EVENT_COLS[:8]].sum(axis=1)
+df["combined"] = df["endurance"] + df["efficiency"]
+df["total_ex_ee"] = df["total"] - df["combined"]
+
 corr = df[EVENT_COLS].corr()
+print(corr)
+
+slope = corr['total_ex_ee']['combined'] * (df['total_ex_ee'].std() / df['combined'].std())
+print(slope)
 
 fig, ax = plt.subplots(figsize=(8, 6))
 im = ax.imshow(corr, cmap="RdYlGn", vmin=-1, vmax=1)
